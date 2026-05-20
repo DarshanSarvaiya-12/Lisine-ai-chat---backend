@@ -13,10 +13,9 @@ app.use(express.static('public'));
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // --- In-Memory Session Storage ---
-// This temporary storage acts as a local cache to track conversation histories per user
 const chatHistories = new Map();
 
-// --- System Prompts (Point-to-Point, Concise) ---
+// --- System Prompts ---
 const QUESTION_PROMPT = `You are Lisine, a precise business expert. Your goal is to interview the user to build a flawless AI prompt. 
 Analyze their inputs and ask exactly ONE deep, investigative question at a time regarding their audience, goals, USPs, or tone. 
 Be exceptionally direct, sharp, and point-to-point. Avoid conversational filler or introductory fluff.`;
@@ -28,61 +27,61 @@ The prompt must be concise, structured, and capture every requirement discussed.
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, sessionId = 'default-session' } = req.body;
-    
+
     if (!message) {
       return res.status(400).json({ error: "Message content is required" });
     }
-    
-    // Initialize history array for this session if it doesn't exist yet
+
+    // Initialize history array for this session if it doesn't exist
     if (!chatHistories.has(sessionId)) {
       chatHistories.set(sessionId, []);
     }
-    
+
     const sessionHistory = chatHistories.get(sessionId);
-    
-    // 1. Save User Message to RAM history array
+
+    // 1. Save User Message to RAM history
     sessionHistory.push({ role: 'user', content: message });
-    
+
     // 2. Check for Synthesis Trigger
     if (message.toLowerCase().includes('give me prompt back')) {
       const historyText = sessionHistory.map(m => `${m.role}: ${m.content}`).join('\n');
-      
+
+      // Using the highly complex Llama 3.3 70B model for synthesis task
       const completion = await groq.chat.completions.create({
         messages: [
           { role: "system", content: GENERATE_FINAL_PROMPT },
           { role: "user", content: `Interview History:\n${historyText}` }
         ],
-        model: "llama-3.1-8b-instant",
+        model: "llama-3.3-70b-specdec",
         temperature: 0.2,
       });
-      
+
       const finalPrompt = completion.choices[0].message.content.trim();
-      
+
       // Save generation to history
       sessionHistory.push({ role: 'assistant', content: finalPrompt });
       return res.json({ reply: finalPrompt });
     }
-    
-    // 3. Normal Interview Flow (Limit history window context to last 20 elements)
+
+    // 3. Normal Interview Flow (Using ultra-fast Llama 3.1 8B text model)
     const recentMessages = sessionHistory.slice(-20);
-    
-    // Execute LLM completion call
+
     const chatCompletion = await groq.chat.completions.create({
       messages: [
         { role: "system", content: QUESTION_PROMPT },
         ...recentMessages
       ],
-      model: "llama-3.3-70b-versatile",
+      model: "llama-3.1-8b-instant",
       temperature: 0.5
     });
-    
+
     const aiReply = chatCompletion.choices[0].message.content.trim();
-    
-    // 4. Save AI Reply to RAM history array
+
+    // 4. Save AI Reply to RAM history
     sessionHistory.push({ role: 'assistant', content: aiReply });
-    
+
     return res.json({ reply: aiReply });
-    
+
   } catch (error) {
     console.error("API Error:", error);
     return res.status(500).json({ error: "Internal Server Error" });
