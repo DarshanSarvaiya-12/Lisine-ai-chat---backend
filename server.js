@@ -26,67 +26,67 @@ The prompt must be concise, structured, and capture every requirement discussed.
 
 // --- Core API Route ---
 app.post('/api/chat', async (req, res) => {
-    try {
-        const { message, sessionId = 'default-session' } = req.body;
-
-        if (!message) {
-            return res.status(400).json({ error: "Message content is required" });
-        }
-
-        // Initialize history array for this session if it doesn't exist yet
-        if (!chatHistories.has(sessionId)) {
-            chatHistories.set(sessionId, []);
-        }
-
-        const sessionHistory = chatHistories.get(sessionId);
-
-        // 1. Save User Message to RAM history array
-        sessionHistory.push({ role: 'user', content: message });
-
-        // 2. Check for Synthesis Trigger
-        if (message.toLowerCase().includes('give me prompt back')) {
-            const historyText = sessionHistory.map(m => `${m.role}: ${m.content}`).join('\n');
-
-            const completion = await groq.chat.completions.create({
-                messages: [
-                    { role: "system", content: GENERATE_FINAL_PROMPT },
-                    { role: "user", content: `Interview History:\n${historyText}` }
-                ],
-                model: "llama3-70b-8192",
-                temperature: 0.2,
-            });
-
-            const finalPrompt = completion.choices[0].message.content.trim();
-            
-            // Save generation to history
-            sessionHistory.push({ role: 'assistant', content: finalPrompt });
-            return res.json({ reply: finalPrompt });
-        }
-
-        // 3. Normal Interview Flow (Limit history window context to last 20 elements)
-        const recentMessages = sessionHistory.slice(-20);
-
-        // Execute LLM completion call
-        const chatCompletion = await groq.chat.completions.create({
-            messages: [
-                { role: "system", content: QUESTION_PROMPT },
-                ...recentMessages
-            ],
-            model: "llama3-8b-8192",
-            temperature: 0.5
-        });
-
-        const aiReply = chatCompletion.choices[0].message.content.trim();
-
-        // 4. Save AI Reply to RAM history array
-        sessionHistory.push({ role: 'assistant', content: aiReply });
-
-        return res.json({ reply: aiReply });
-
-    } catch (error) {
-        console.error("API Error:", error);
-        return res.status(500).json({ error: "Internal Server Error" });
+  try {
+    const { message, sessionId = 'default-session' } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: "Message content is required" });
     }
+    
+    // Initialize history array for this session if it doesn't exist yet
+    if (!chatHistories.has(sessionId)) {
+      chatHistories.set(sessionId, []);
+    }
+    
+    const sessionHistory = chatHistories.get(sessionId);
+    
+    // 1. Save User Message to RAM history array
+    sessionHistory.push({ role: 'user', content: message });
+    
+    // 2. Check for Synthesis Trigger
+    if (message.toLowerCase().includes('give me prompt back')) {
+      const historyText = sessionHistory.map(m => `${m.role}: ${m.content}`).join('\n');
+      
+      const completion = await groq.chat.completions.create({
+        messages: [
+          { role: "system", content: GENERATE_FINAL_PROMPT },
+          { role: "user", content: `Interview History:\n${historyText}` }
+        ],
+        model: "llama-3.1-8b-instant",
+        temperature: 0.2,
+      });
+      
+      const finalPrompt = completion.choices[0].message.content.trim();
+      
+      // Save generation to history
+      sessionHistory.push({ role: 'assistant', content: finalPrompt });
+      return res.json({ reply: finalPrompt });
+    }
+    
+    // 3. Normal Interview Flow (Limit history window context to last 20 elements)
+    const recentMessages = sessionHistory.slice(-20);
+    
+    // Execute LLM completion call
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        { role: "system", content: QUESTION_PROMPT },
+        ...recentMessages
+      ],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.5
+    });
+    
+    const aiReply = chatCompletion.choices[0].message.content.trim();
+    
+    // 4. Save AI Reply to RAM history array
+    sessionHistory.push({ role: 'assistant', content: aiReply });
+    
+    return res.json({ reply: aiReply });
+    
+  } catch (error) {
+    console.error("API Error:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 app.listen(port, () => console.log(`Lisine Engine active on port ${port}`));
