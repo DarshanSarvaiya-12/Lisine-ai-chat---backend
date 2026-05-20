@@ -1,94 +1,112 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const Groq = require('groq-sdk');
-const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- Groq & MongoDB Setup ---
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log("Connected to MongoDB"))
-  .catch(err => console.error("MongoDB Connection Error:", err));
-
-// --- Database Schema ---
-const chatSchema = new mongoose.Schema({
-    role: String, // 'user' or 'assistant'
-    content: String,
-    timestamp: { type: Date, default: Date.now }
-});
-const Message = mongoose.model('Message', chatSchema);
-
+// --- Express Middleware ---
 app.use(express.json());
 app.use(express.static('public'));
 
-// --- System Prompts ---
-const QUESTION_PROMPT = "You are Lisine, a business expert. Your goal is to interview the user to help them build a perfect AI prompt. Ask deep, investigative questions about their target audience, business goals, unique selling points, and tone. Ask only ONE question at a time to keep it professional.";
+// --- Database Connection ---
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log("Connected to MongoDB successfully."))
+  .catch(err => console.error("MongoDB Connection Failure:", err));
 
-const GENERATE_FINAL_PROMPT = "Based on the following business interview history, synthesize all the information into a single, high-quality, professional AI system prompt. The prompt should be concise yet cover every detail discussed. Output ONLY the final prompt.";
+// --- Database Schema & Indexing ---
+const chatSchema = new mongoose.Schema({
+    sessionId: { type: String, required: true, index: true }, // Isolates user conversations
+    role: { type: String, required: true, enum: ['user', 'assistant', 'system'] },
+    content: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now }
+});
 
-// --- API Routes ---
+// Compound index to make history lookups blazing fast
+chatSchema.index({ sessionId: 1, timestamp: 1 });
+const Message = mongoose.model('Message', chatSchema);
+
+// --- Groq Client Initialization ---
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// --- System Prompts (Optimized for point-to-point, concise answers) ---
+const QUESTION_PROMPT = `You are Lisine, a precise business expert. Your goal is to interview the user to build a flawless AI prompt. 
+Analyze their inputs and ask exactly ONE deep, investigative question at a time regarding their audience, goals, USPs, or tone. 
+Be exceptionally direct, sharp, and point-to-point. Avoid conversational filler or introductory fluff.`;
+
+const GENERATE_FINAL_PROMPT = `Analyze the provided business interview history. Synthesize the findings into a single, high-quality, professional AI system prompt. 
+The prompt must be concise, structured, and capture every requirement discussed. Output ONLY the final prompt text. Do not include introductions, explanations, or markdown code blocks.`;
+
+// --- Core API Route ---
 app.post('/api/chat', async (req, res) => {
     try {
-        const { message } = req.body;
+        // Always pass a sessionId from your frontend (e.g., stored in localStorage or cookie)
+        const { message, sessionId = 'default-session' } = req.body;
 
-        // 1. Save User Message to DB
-        const userMsg = new Message({ role: 'user', content: message });
-        await userMsg.save();
+        if (!message) {
+            return res.status(400).json({ error: "Message content is required" });
+        }
 
-        // 2. Check if user wants the final prompt
+        // 1. Save User Message to Database
+        await Message.create({ sessionId, role: 'user', content: message });
+
+        // 2. Check for Synthesis Trigger
         if (message.toLowerCase().includes('give me prompt back')) {
-            const allHistory = await Message.find().sort({ timestamp: 1 });
-            const historyText = allHistory.map(m => `${m.role}: ${m.content}`).join('\n');
+            // Fetch the exact history for this session ordered chronologically
+            const rawHistory = await Message.find({ sessionId }).sort({ timestamp: 1 });
+            const historyText = rawHistory.map(m => `${m.role}: ${m.content}`).join('\n');
 
             const completion = await groq.chat.completions.create({
                 messages: [
                     { role: "system", content: GENERATE_FINAL_PROMPT },
-                    { role: "user", content: `Here is the business data:\n${historyText}` }
+                    { role: "user", content: `Interview History:\n${historyText}` }
                 ],
                 model: "llama3-70b-8192",
+                temperature: 0.2, // Lower temperature keeps it tightly focused on instructions
             });
 
-            const finalPrompt = completion.choices[0].message.content;
-            const aiMsg = new Message({ role: 'assistant', content: finalPrompt });
-            await aiMsg.save();
+            const finalPrompt = completion.choices[0].message.content.trim();
+            
+            // Save generation to database history
+            await Message.create({ sessionId, role: 'assistant', content: finalPrompt });
             return res.json({ reply: finalPrompt });
         }
 
-        // 3. Normal questioning flow (Retrieve last 25 messages)
-        const recentHistory = await Message.find()
+        // 3. Normal Interview Flow (Fetch last 20 messages for context window)
+        const recentMessages = await Message.find({ sessionId })
             .sort({ timestamp: -1 })
-            .limit(25);
-        
-        // Reverse because we queried them in descending order
-        const formattedHistory = recentHistory.reverse().map(m => ({
-            role: m.role,
-            content: m.content
-        }));
+            .limit(20);
 
+        // Map and reverse efficiently in memory to build correct timeline
+        const formattedHistory = recentMessages
+            .reverse()
+            .map(m => ({
+                role: m.role,
+                content: m.content
+            }));
+
+        // Execute LLM completion call
         const chatCompletion = await groq.chat.completions.create({
             messages: [
                 { role: "system", content: QUESTION_PROMPT },
                 ...formattedHistory
             ],
             model: "llama3-8b-8192",
+            temperature: 0.5
         });
 
-        const aiReply = chatCompletion.choices[0].message.content;
-        
-        // 4. Save AI Response to DB
-        const aiResponse = new Message({ role: 'assistant', content: aiReply });
-        await aiResponse.save();
+        const aiReply = chatCompletion.choices[0].message.content.trim();
 
-        res.json({ reply: aiReply });
+        // 4. Save AI Reply to Database
+        await Message.create({ sessionId, role: 'assistant', content: aiReply });
+
+        return res.json({ reply: aiReply });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Server Error" });
+        console.error("API Error:", error);
+        return res.status(500).json({ error: "Internal Server Error" });
     }
 });
 
-app.listen(port, () => console.log(`Lisine running on port ${port}`));
+app.listen(port, () => console.log(`Lisine Engine active on port ${port}`));
